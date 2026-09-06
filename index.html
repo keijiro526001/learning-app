@@ -54,7 +54,7 @@
       gap: 8px;
       margin: 12px 0;
     }
-    select, button, label.btn {
+    select, button, input[type="text"] {
       font-size: 0.9rem;
       padding: 8px 12px;
       border-radius: 8px;
@@ -62,9 +62,11 @@
       background: #fff;
       color: #333;
       text-align: center;
+    }
+    button {
       cursor: pointer;
     }
-    button.primary, label.btn.primary {
+    button.primary {
       background: #007aff;
       color: #fff;
       border: none;
@@ -121,6 +123,8 @@
       font-size: 1.25rem;
       line-height: 1.5;
       word-break: break-word;
+      user-select: text;
+      -webkit-user-select: text;
     }
     .actions {
       display: flex;
@@ -142,9 +146,6 @@
       background: #34c759;
       color: #fff;
     }
-    .file-input {
-      display: none;
-    }
     .empty-state {
       display: flex;
       flex-direction: column;
@@ -154,6 +155,45 @@
       gap: 16px;
       text-align: center;
       color: #666;
+    }
+
+    /* Modal / Overlay Style */
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal.active {
+      display: flex;
+    }
+    .modal-content {
+      background: #fff;
+      border-radius: 16px;
+      padding: 20px;
+      width: 100%;
+      max-width: 500px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .modal-content h2 {
+      font-size: 1.1rem;
+    }
+    .modal-content textarea {
+      width: 100%;
+      height: 150px;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #ccc;
+      font-size: 0.9rem;
+      resize: none;
+      user-select: text;
+      -webkit-user-select: text;
     }
   </style>
 </head>
@@ -170,15 +210,13 @@
         <option value="random">ランダム順</option>
         <option value="srs">忘却曲線（復習優先）</option>
       </select>
-      <label class="btn primary">
-        CSV読み込み
-        <input type="file" id="csvFile" class="file-input" accept=".csv,.txt">
-      </label>
+      <button class="primary" id="btnOpenAiModal">AI問題追加</button>
+      <button id="btnOpenKeyModal">⚙️</button>
     </div>
 
     <div class="card-container" id="cardContainer">
       <div class="empty-state" id="emptyState">
-        <p>問題データがありません。<br>CSVファイルを読み込んでください。</p>
+        <p>問題データがありません。<br>「AI問題追加」からテキストを入力してください。</p>
       </div>
       <div class="card" id="card" style="display: none;">
         <div class="card-face card-front">
@@ -198,8 +236,31 @@
     </div>
   </div>
 
+  <!-- API Key Modal -->
+  <div class="modal" id="keyModal">
+    <div class="modal-content">
+      <h2>Gemini APIキー設定</h2>
+      <p style="font-size: 0.8rem; color: #666;">Google AI Studio等で取得したAPIキーを入力してください（ブラウザ内にのみ保存されます）。</p>
+      <input type="text" id="apiKeyInput" placeholder="AIzaSy..." style="text-align: left;">
+      <button class="primary" id="btnSaveKey">保存</button>
+    </div>
+  </div>
+
+  <!-- Generate Modal -->
+  <div class="modal" id="aiModal">
+    <div class="modal-content">
+      <h2>テキストから問題を自動生成</h2>
+      <textarea id="aiInputText" placeholder="ここに勉強したい文章やノートを貼り付けてください..."></textarea>
+      <div style="display: flex; gap: 8px;">
+        <button id="btnCloseAiModal" style="flex: 1;">キャンセル</button>
+        <button class="primary" id="btnGenerate" style="flex: 2;">生成実行</button>
+      </div>
+    </div>
+  </div>
+
   <script>
-    const DB_KEY = 'flashcards_data_v1';
+    const DB_KEY = 'flashcards_data_v2';
+    const API_KEY_STORAGE = 'gemini_api_key';
     let cards = [];
     let currentCard = null;
     let isFlipped = false;
@@ -211,18 +272,21 @@
     const emptyState = document.getElementById('emptyState');
     const statsEl = document.getElementById('stats');
     const modeSelect = document.getElementById('modeSelect');
-    const csvFileInput = document.getElementById('csvFile');
     const btnWrong = document.getElementById('btnWrong');
     const btnCorrect = document.getElementById('btnCorrect');
 
-    // 初期化
+    // Modals
+    const keyModal = document.getElementById('keyModal');
+    const aiModal = document.getElementById('aiModal');
+    const apiKeyInput = document.getElementById('apiKeyInput');
+    const aiInputText = document.getElementById('aiInputText');
+
     function init() {
       loadData();
       setupEvents();
       nextCard();
     }
 
-    // イベント設定
     function setupEvents() {
       cardEl.addEventListener('click', () => {
         if (!currentCard) return;
@@ -230,78 +294,116 @@
         cardEl.classList.toggle('flipped', isFlipped);
       });
 
-      csvFileInput.addEventListener('change', handleFileImport);
       modeSelect.addEventListener('change', () => nextCard());
-
       btnWrong.addEventListener('click', () => handleAnswer(false));
       btnCorrect.addEventListener('click', () => handleAnswer(true));
+
+      // Key Modal
+      document.getElementById('btnOpenKeyModal').addEventListener('click', () => {
+        apiKeyInput.value = localStorage.getItem(API_KEY_STORAGE) || '';
+        keyModal.classList.add('active');
+      });
+      document.getElementById('btnSaveKey').addEventListener('click', () => {
+        const key = apiKeyInput.value.trim();
+        if (key) {
+          localStorage.setItem(API_KEY_STORAGE, key);
+          keyModal.classList.remove('active');
+          alert('APIキーを保存しました。');
+        }
+      });
+
+      // AI Modal
+      document.getElementById('btnOpenAiModal').addEventListener('click', () => {
+        const key = localStorage.getItem(API_KEY_STORAGE);
+        if (!key) {
+          alert('先に⚙️アイコンからAPIキーを設定してください。');
+          return;
+        }
+        aiModal.classList.add('active');
+      });
+      document.getElementById('btnCloseAiModal').addEventListener('click', () => {
+        aiModal.classList.remove('active');
+      });
+      document.getElementById('btnGenerate').addEventListener('click', generateCardsWithAI);
     }
 
-    // データ読み込み（LocalStorage）
     function loadData() {
       const raw = localStorage.getItem(DB_KEY);
       if (raw) {
-        try {
-          cards = JSON.parse(raw);
-        } catch (e) {
-          cards = [];
-        }
+        try { cards = JSON.parse(raw); } catch (e) { cards = []; }
       }
     }
 
-    // データ保存
     function saveData() {
       localStorage.setItem(DB_KEY, JSON.stringify(cards));
     }
 
-    // CSVインポート処理
-    function handleFileImport(e) {
-      const file = e.target.files[0];
-      if (!file) return;
+    async function generateCardsWithAI() {
+      const text = aiInputText.value.trim();
+      const apiKey = localStorage.getItem(API_KEY_STORAGE);
 
-      const reader = new FileReader();
-      reader.onload = function(evt) {
-        const text = evt.target.result;
-        parseCSV(text);
-      };
-      reader.readAsText(file);
-    }
+      if (!text) {
+        alert('テキストを入力してください。');
+        return;
+      }
 
-    function parseCSV(text) {
-      const lines = text.split(/\r\n|\n/);
-      const newCards = [];
+      const btnGen = document.getElementById('btnGenerate');
+      btnGen.disabled = true;
+      btnGen.textContent = '生成中...';
 
-      lines.forEach((line, index) => {
-        if (!line.trim()) return;
-        // カンマ区切り（簡易パース）
-        const parts = line.split(',');
-        if (parts.length >= 2) {
-          const q = parts[0].trim();
-          const a = parts.slice(1).join(',').trim(); // カンマが含まれる解答対策
-          if (q && a) {
-            newCards.push({
-              id: 'c_' + Date.now() + '_' + index,
-              q: q,
-              a: a,
-              interval: 1, // 復習間隔（日）
-              repetition: 0,
-              nextReview: Date.now()
-            });
-          }
-        }
-      });
+      const prompt = `以下のテキストから一問一答形式の問題と解答を複数作成してください。
+JSON配列形式のみで出力し、他テキストや解説、markdownタグ（\`\`\`json等）は含めないでください。
+フォーマット:
+[
+  {"q": "問題文1", "a": "解答1"},
+  {"q": "問題文2", "a": "解答2"}
+]
 
-      if (newCards.length > 0) {
-        cards = newCards;
+【テキスト】
+${text}`;
+
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }]
+          })
+        });
+
+        const data = await res.json();
+        const rawResponse = data.candidates[0].content.parts[0].text;
+        
+        // Clean JSON formatting
+        const cleanJson = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(cleanJson);
+
+        const newCards = parsed.map((item, idx) => ({
+          id: 'c_' + Date.now() + '_' + idx,
+          q: item.q,
+          a: item.a,
+          interval: 1,
+          repetition: 0,
+          nextReview: Date.now()
+        }));
+
+        cards = [...cards, ...newCards];
         saveData();
-        alert(`${cards.length}件の問題を読み込みました。`);
+
+        alert(`${newCards.length}件の問題を追加しました！`);
+        aiInputText.value = '';
+        aiModal.classList.remove('active');
         nextCard();
-      } else {
-        alert('有効な問題データが見つかりませんでした。');
+
+      } catch (e) {
+        alert('生成に失敗しました。APIキーまたは入力データを確認してください。');
+        console.error(e);
+      } finally {
+        btnGen.disabled = false;
+        btnGen.textContent = '生成実行';
       }
     }
 
-    // 次の問題を選ぶ
     function nextCard() {
       isFlipped = false;
       cardEl.classList.remove('flipped');
@@ -326,8 +428,6 @@
         const idx = Math.floor(Math.random() * cards.length);
         currentCard = cards[idx];
       } else {
-        // 忘却曲線（復習期日が古い順、かつ未学習優先）
-        const now = Date.now();
         const sorted = [...cards].sort((a, b) => (a.nextReview || 0) - (b.nextReview || 0));
         currentCard = sorted[0];
       }
@@ -337,7 +437,6 @@
       statsEl.textContent = `全 ${cards.length} 問`;
     }
 
-    // 回答処理（簡易SuperMemo-2アルゴリズム）
     function handleAnswer(isCorrect) {
       if (!currentCard) return;
 
@@ -363,7 +462,6 @@
       nextCard();
     }
 
-    // 起動
     init();
   </script>
 </body>

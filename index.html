@@ -53,6 +53,7 @@
       display: flex;
       gap: 8px;
       margin: 12px 0;
+      flex-wrap: wrap;
     }
     select, button, input[type="text"] {
       font-size: 0.9rem;
@@ -62,6 +63,10 @@
       background: #fff;
       color: #333;
       text-align: center;
+    }
+    select {
+      flex: 1;
+      min-width: 120px;
     }
     button {
       cursor: pointer;
@@ -206,6 +211,10 @@
     </header>
 
     <div class="controls">
+      <!-- デッキ選択ドロップダウン -->
+      <select id="deckSelect">
+        <option value="">(問題集がありません)</option>
+      </select>
       <select id="modeSelect">
         <option value="random">ランダム順</option>
         <option value="srs">忘却曲線（復習優先）</option>
@@ -250,6 +259,7 @@
   <div class="modal" id="aiModal">
     <div class="modal-content">
       <h2>テキストから問題を自動生成</h2>
+      <input type="text" id="deckTitleInput" placeholder="問題集のタイトル（例: 日本史 第1章）" style="text-align: left;">
       <textarea id="aiInputText" placeholder="ここに勉強したい文章やノートを貼り付けてください..."></textarea>
       <div style="display: flex; gap: 8px;">
         <button id="btnCloseAiModal" style="flex: 1;">キャンセル</button>
@@ -259,9 +269,15 @@
   </div>
 
   <script>
-    const DB_KEY = 'flashcards_data_v2';
+    const STORAGE_KEY_DECKS = 'flashcards_decks_v3';
+    const STORAGE_KEY_STATE = 'flashcards_state_v3';
     const API_KEY_STORAGE = 'gemini_api_key';
-    let cards = [];
+
+    // 旧バージョンのLocalStorageキー（マイグレーション用）
+    const DB_KEY_V2 = 'flashcards_data_v2';
+
+    let decks = []; // デッキ一覧: [{ id, title, cards: [...] }]
+    let currentDeckId = null;
     let currentCard = null;
     let isFlipped = false;
 
@@ -272,6 +288,7 @@
     const emptyState = document.getElementById('emptyState');
     const statsEl = document.getElementById('stats');
     const modeSelect = document.getElementById('modeSelect');
+    const deckSelect = document.getElementById('deckSelect');
     const btnWrong = document.getElementById('btnWrong');
     const btnCorrect = document.getElementById('btnCorrect');
 
@@ -280,11 +297,12 @@
     const aiModal = document.getElementById('aiModal');
     const apiKeyInput = document.getElementById('apiKeyInput');
     const aiInputText = document.getElementById('aiInputText');
+    const deckTitleInput = document.getElementById('deckTitleInput');
 
     function init() {
       loadData();
       setupEvents();
-      nextCard();
+      restoreAppState();
     }
 
     function setupEvents() {
@@ -294,7 +312,17 @@
         cardEl.classList.toggle('flipped', isFlipped);
       });
 
-      modeSelect.addEventListener('change', () => nextCard());
+      deckSelect.addEventListener('change', (e) => {
+        currentDeckId = e.target.value || null;
+        saveAppState();
+        nextCard();
+      });
+
+      modeSelect.addEventListener('change', () => {
+        saveAppState();
+        nextCard();
+      });
+
       btnWrong.addEventListener('click', () => handleAnswer(false));
       btnCorrect.addEventListener('click', () => handleAnswer(true));
 
@@ -319,6 +347,8 @@
           alert('先に⚙️アイコンからAPIキーを設定してください。');
           return;
         }
+        deckTitleInput.value = '';
+        aiInputText.value = '';
         aiModal.classList.add('active');
       });
       document.getElementById('btnCloseAiModal').addEventListener('click', () => {
@@ -327,19 +357,107 @@
       document.getElementById('btnGenerate').addEventListener('click', generateCardsWithAI);
     }
 
+    // データ読み込み & 旧データ互換処理（マイグレーション）
     function loadData() {
-      const raw = localStorage.getItem(DB_KEY);
-      if (raw) {
-        try { cards = JSON.parse(raw); } catch (e) { cards = []; }
+      const rawDecks = localStorage.getItem(STORAGE_KEY_DECKS);
+      if (rawDecks) {
+        try {
+          decks = JSON.parse(rawDecks);
+        } catch (e) {
+          decks = [];
+        }
+      } else {
+        // V2からのデータ引き継ぎ処理
+        const oldData = localStorage.getItem(DB_KEY_V2);
+        if (oldData) {
+          try {
+            const oldCards = JSON.parse(oldData);
+            if (Array.isArray(oldCards) && oldCards.length > 0) {
+              const migratedDeck = {
+                id: 'deck_' + Date.now(),
+                title: 'デフォルト問題集',
+                cards: oldCards
+              };
+              decks = [migratedDeck];
+              saveData();
+            }
+          } catch (e) {
+            decks = [];
+          }
+        }
       }
+      renderDeckOptions();
     }
 
     function saveData() {
-      localStorage.setItem(DB_KEY, JSON.stringify(cards));
+      localStorage.setItem(STORAGE_KEY_DECKS, JSON.stringify(decks));
+      renderDeckOptions();
+    }
+
+    // アプリの状態（選択中のデッキ、モード、最後のカードID）を保存
+    function saveAppState() {
+      const state = {
+        currentDeckId: currentDeckId,
+        mode: modeSelect.value,
+        lastCardId: currentCard ? currentCard.id : null
+      };
+      localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(state));
+    }
+
+    // 保存していた状態を復元
+    function restoreAppState() {
+      const rawState = localStorage.getItem(STORAGE_KEY_STATE);
+      let lastCardId = null;
+
+      if (rawState) {
+        try {
+          const state = JSON.parse(rawState);
+          if (state.mode) modeSelect.value = state.mode;
+          if (state.currentDeckId && decks.some(d => d.id === state.currentDeckId)) {
+            currentDeckId = state.currentDeckId;
+          }
+          lastCardId = state.lastCardId || null;
+        } catch (e) {}
+      }
+
+      // デッキ未選択かつデータがあれば先頭を選択
+      if (!currentDeckId && decks.length > 0) {
+        currentDeckId = decks[0].id;
+      }
+
+      deckSelect.value = currentDeckId || '';
+      nextCard(lastCardId);
+    }
+
+    function renderDeckOptions() {
+      deckSelect.innerHTML = '';
+      if (decks.length === 0) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = '(問題集がありません)';
+        deckSelect.appendChild(option);
+        return;
+      }
+
+      decks.forEach(deck => {
+        const option = document.createElement('option');
+        option.value = deck.id;
+        option.textContent = `${deck.title} (${deck.cards.length}問)`;
+        deckSelect.appendChild(option);
+      });
+
+      if (currentDeckId) {
+        deckSelect.value = currentDeckId;
+      }
+    }
+
+    function getCurrentDeck() {
+      return decks.find(d => d.id === currentDeckId) || null;
     }
 
     async function generateCardsWithAI() {
       const text = aiInputText.value.trim();
+      const title = deckTitleInput.value.trim() || `問題集 (${new Date().toLocaleDateString('ja-JP')})`;
       const apiKey = localStorage.getItem(API_KEY_STORAGE);
 
       if (!text) {
@@ -363,8 +481,7 @@
 【対象テキスト】
 ${text}`;
 
-      // 優先度の高いモデル順に試行する
-      const candidateModels = ['gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-1.5-flash'];
+      const candidateModels = ['gemini-2.5-flash', 'gemini-1.5-flash'];
       let lastError = null;
       let successData = null;
 
@@ -404,8 +521,6 @@ ${text}`;
         }
 
         const rawResponse = successData.candidates[0].content.parts[0].text;
-        
-        // JSON抽出処理
         const cleanJson = rawResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
         const parsed = JSON.parse(cleanJson);
 
@@ -422,12 +537,23 @@ ${text}`;
           nextReview: Date.now()
         }));
 
-        cards = [...cards, ...newCards];
+        // 新しいデッキを作成して保存
+        const newDeck = {
+          id: 'deck_' + Date.now(),
+          title: title,
+          cards: newCards
+        };
+
+        decks.push(newDeck);
+        currentDeckId = newDeck.id;
         saveData();
 
-        alert(`${newCards.length}件の問題を追加しました！`);
+        alert(`新しい問題集「${title}」(${newCards.length}件) を追加しました！`);
         aiInputText.value = '';
+        deckTitleInput.value = '';
         aiModal.classList.remove('active');
+        
+        saveAppState();
         nextCard();
 
       } catch (e) {
@@ -439,17 +565,20 @@ ${text}`;
       }
     }
 
-    function nextCard() {
+    function nextCard(targetCardId = null) {
       isFlipped = false;
       cardEl.classList.remove('flipped');
 
-      if (cards.length === 0) {
+      const deck = getCurrentDeck();
+
+      if (!deck || deck.cards.length === 0) {
         emptyState.style.display = 'flex';
         cardEl.style.display = 'none';
         btnWrong.disabled = true;
         btnCorrect.disabled = true;
         statsEl.textContent = '0 / 0';
         currentCard = null;
+        saveAppState();
         return;
       }
 
@@ -458,18 +587,33 @@ ${text}`;
       btnWrong.disabled = false;
       btnCorrect.disabled = false;
 
+      // 前回途中で終わったカード指定がある場合
+      if (targetCardId) {
+        const found = deck.cards.find(c => c.id === targetCardId);
+        if (found) {
+          currentCard = found;
+          frontText.textContent = currentCard.q;
+          backText.textContent = currentCard.a;
+          statsEl.textContent = `全 ${deck.cards.length} 問`;
+          saveAppState();
+          return;
+        }
+      }
+
       const mode = modeSelect.value;
       if (mode === 'random') {
-        const idx = Math.floor(Math.random() * cards.length);
-        currentCard = cards[idx];
+        const idx = Math.floor(Math.random() * deck.cards.length);
+        currentCard = deck.cards[idx];
       } else {
-        const sorted = [...cards].sort((a, b) => (a.nextReview || 0) - (b.nextReview || 0));
+        const sorted = [...deck.cards].sort((a, b) => (a.nextReview || 0) - (b.nextReview || 0));
         currentCard = sorted[0];
       }
 
       frontText.textContent = currentCard.q;
       backText.textContent = currentCard.a;
-      statsEl.textContent = `全 ${cards.length} 問`;
+      statsEl.textContent = `全 ${deck.cards.length} 問`;
+      
+      saveAppState();
     }
 
     function handleAnswer(isCorrect) {

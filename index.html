@@ -338,6 +338,29 @@
       localStorage.setItem(DB_KEY, JSON.stringify(cards));
     }
 
+    // 利用可能なモデル一覧をAPIキーから直接取得する関数
+    async function getAvailableModel(apiKey) {
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (!data.models) return null;
+
+        // generateContent がサポートされているモデルを探す
+        const supportedModels = data.models
+          .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
+          .map(m => m.name.replace('models/', ''));
+
+        if (supportedModels.length === 0) return null;
+
+        // flash または 優先モデルを検索
+        const preferred = supportedModels.find(m => m.includes('flash')) || supportedModels[0];
+        return preferred;
+      } catch (e) {
+        return null;
+      }
+    }
+
     async function generateCardsWithAI() {
       const text = aiInputText.value.trim();
       const apiKey = localStorage.getItem(API_KEY_STORAGE);
@@ -349,9 +372,18 @@
 
       const btnGen = document.getElementById('btnGenerate');
       btnGen.disabled = true;
-      btnGen.textContent = '生成中...';
+      btnGen.textContent = 'モデル確認中...';
 
-      const prompt = `以下のテキストから一問一答形式の問題と解答を複数作成してください。
+      try {
+        // 利用可能なモデルを取得（取得できなければデフォルト値を使用）
+        let targetModel = await getAvailableModel(apiKey);
+        if (!targetModel) {
+          targetModel = 'gemini-1.5-flash-latest';
+        }
+
+        btnGen.textContent = '生成中...';
+
+        const prompt = `以下のテキストから一問一答形式の問題と解答を複数作成してください。
 必ずJSON配列形式のみで出力し、解説や思考プロセス、markdownタグ（\`\`\`json等）は一切含めないでください。
 
 フォーマット例:
@@ -363,25 +395,19 @@
 【対象テキスト】
 ${text}`;
 
-      try {
-        // v1beta の gemini-1.5-flash / gemini-2.0-flash 互換エンドポイント呼び出し
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
         
         const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              responseMimeType: "application/json"
-            }
+            contents: [{ parts: [{ text: prompt }] }]
           })
         });
 
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          const errMsg = errData.error?.message || `ステータスコード: ${res.status}`;
-          throw new Error(`APIエラー (${errMsg})`);
+          throw new Error(errData.error?.message || `ステータスコード: ${res.status}`);
         }
 
         const data = await res.json();
@@ -392,12 +418,13 @@ ${text}`;
 
         const rawResponse = data.candidates[0].content.parts[0].text;
         
-        // JSONパース処理
-        const cleanJson = rawResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
+        // JSON抽出処理
+        const jsonMatch = rawResponse.match(/\[\s*\{.*\}\s*\]/s);
+        const cleanJson = jsonMatch ? jsonMatch[0] : rawResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
         const parsed = JSON.parse(cleanJson);
 
         if (!Array.isArray(parsed) || parsed.length === 0) {
-          throw new Error('問題データの抽出に失敗しました。文章量を少し増やしてみてください。');
+          throw new Error('問題データを抽出できませんでした。');
         }
 
         const newCards = parsed.map((item, idx) => ({
@@ -488,4 +515,3 @@ ${text}`;
   </script>
 </body>
 </html>
-

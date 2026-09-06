@@ -352,36 +352,58 @@
       btnGen.textContent = '生成中...';
 
       const prompt = `以下のテキストから一問一答形式の問題と解答を複数作成してください。
-JSON配列形式のみで出力し、他テキストや解説、markdownタグ（\`\`\`json等）は含めないでください。
-フォーマット:
+必ずJSON配列形式のみで出力し、解説や思考プロセス、markdownタグ（\`\`\`json等）は一切含めないでください。
+
+フォーマット例:
 [
   {"q": "問題文1", "a": "解答1"},
   {"q": "問題文2", "a": "解答2"}
 ]
 
-【テキスト】
+【対象テキスト】
 ${text}`;
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        // v1beta の gemini-1.5-flash / gemini-2.0-flash 互換エンドポイント呼び出し
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+        
+        const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }]
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              responseMimeType: "application/json"
+            }
           })
         });
 
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          const errMsg = errData.error?.message || `ステータスコード: ${res.status}`;
+          throw new Error(`APIエラー (${errMsg})`);
+        }
+
         const data = await res.json();
+        
+        if (!data.candidates || !data.candidates[0]?.content?.parts?.[0]?.text) {
+          throw new Error('APIからの返答が空または不正です。');
+        }
+
         const rawResponse = data.candidates[0].content.parts[0].text;
         
-        // Clean JSON formatting
-        const cleanJson = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+        // JSONパース処理
+        const cleanJson = rawResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
         const parsed = JSON.parse(cleanJson);
+
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          throw new Error('問題データの抽出に失敗しました。文章量を少し増やしてみてください。');
+        }
 
         const newCards = parsed.map((item, idx) => ({
           id: 'c_' + Date.now() + '_' + idx,
-          q: item.q,
-          a: item.a,
+          q: item.q || '問題文なし',
+          a: item.a || '解答なし',
           interval: 1,
           repetition: 0,
           nextReview: Date.now()
@@ -396,7 +418,7 @@ ${text}`;
         nextCard();
 
       } catch (e) {
-        alert('生成に失敗しました。APIキーまたは入力データを確認してください。');
+        alert(`生成に失敗しました:\n${e.message}`);
         console.error(e);
       } finally {
         btnGen.disabled = false;
